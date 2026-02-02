@@ -1,14 +1,10 @@
 //! FORGE Conformance Test Suite - Test Runner
 //!
 //! Main entry point for running FORGE conformance tests.
-//! Supports filtering, parallel execution, and result reporting.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const framework = @import("framework.zig");
-const golden = @import("golden.zig");
 
-// Import all test suites
 const scene_tests = @import("scene/tests.zig");
 const mesh_tests = @import("mesh/tests.zig");
 const material_tests = @import("material/tests.zig");
@@ -17,7 +13,6 @@ const camera_tests = @import("camera/tests.zig");
 const lighting_tests = @import("lighting/tests.zig");
 const render_tests = @import("render/tests.zig");
 
-/// All registered test suites.
 const all_suites = [_]*const framework.TestSuite{
     &scene_tests.suite,
     &mesh_tests.suite,
@@ -28,35 +23,19 @@ const all_suites = [_]*const framework.TestSuite{
     &render_tests.suite,
 };
 
-/// Command-line options for the test runner.
+const OutputFormat = enum { text, json, junit };
+
 const Options = struct {
-    /// Filter tests by name pattern.
     filter: ?[]const u8 = null,
-    /// Filter by test suite.
     suite: ?[]const u8 = null,
-    /// Update golden images instead of comparing.
     update_golden: bool = false,
-    /// Enable verbose output.
     verbose: bool = false,
-    /// Skip GPU-dependent tests.
     skip_gpu: bool = false,
-    /// Show help and exit.
     help: bool = false,
-    /// List all available tests.
     list: bool = false,
-    /// Output format (text, json, junit).
     format: OutputFormat = .text,
-    /// Number of parallel test threads.
-    jobs: u32 = 1,
 };
 
-const OutputFormat = enum {
-    text,
-    json,
-    junit,
-};
-
-/// Aggregated results from all test suites.
 const RunnerResults = struct {
     total_passed: u32 = 0,
     total_failed: u32 = 0,
@@ -66,25 +45,20 @@ const RunnerResults = struct {
     start_time: i64,
     end_time: i64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator) RunnerResults {
-        return .{
-            .suite_results = std.ArrayList(framework.SuiteResults).init(allocator),
-            .start_time = std.time.milliTimestamp(),
-        };
+    fn init(allocator: std.mem.Allocator) RunnerResults {
+        return .{ .suite_results = std.ArrayList(framework.SuiteResults).init(allocator), .start_time = std.time.milliTimestamp() };
     }
 
-    pub fn deinit(self: *RunnerResults) void {
-        for (self.suite_results.items) |*result| {
-            result.deinit();
-        }
+    fn deinit(self: *RunnerResults) void {
+        for (self.suite_results.items) |*result| result.deinit();
         self.suite_results.deinit();
     }
 
-    pub fn total(self: RunnerResults) u32 {
+    fn total(self: RunnerResults) u32 {
         return self.total_passed + self.total_failed + self.total_skipped + self.total_not_implemented;
     }
 
-    pub fn duration_ms(self: RunnerResults) i64 {
+    fn durationMs(self: RunnerResults) i64 {
         return self.end_time - self.start_time;
     }
 };
@@ -117,8 +91,8 @@ pub fn main() !void {
     // Output results
     switch (options.format) {
         .text => outputText(results, options.verbose),
-        .json => try outputJson(allocator, results),
-        .junit => try outputJunit(allocator, results),
+        .json => outputJson(results),
+        .junit => outputJunit(results),
     }
 
     // Exit with appropriate code
@@ -130,7 +104,7 @@ pub fn main() !void {
 fn parseArgs() !Options {
     var options = Options{};
     var args = std.process.args();
-    _ = args.skip(); // Skip executable name
+    _ = args.skip();
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -149,16 +123,7 @@ fn parseArgs() !Options {
             options.suite = arg[8..];
         } else if (std.mem.startsWith(u8, arg, "--format=")) {
             const fmt = arg[9..];
-            if (std.mem.eql(u8, fmt, "text")) {
-                options.format = .text;
-            } else if (std.mem.eql(u8, fmt, "json")) {
-                options.format = .json;
-            } else if (std.mem.eql(u8, fmt, "junit")) {
-                options.format = .junit;
-            }
-        } else if (std.mem.startsWith(u8, arg, "--jobs=") or std.mem.startsWith(u8, arg, "-j")) {
-            const num_str = if (std.mem.startsWith(u8, arg, "-j")) arg[2..] else arg[7..];
-            options.jobs = std.fmt.parseInt(u32, num_str, 10) catch 1;
+            options.format = if (std.mem.eql(u8, fmt, "json")) .json else if (std.mem.eql(u8, fmt, "junit")) .junit else .text;
         }
     }
 
@@ -180,16 +145,6 @@ fn printUsage() void {
         \\  --update-golden      Update golden images instead of comparing
         \\  --skip-gpu           Skip tests requiring GPU access
         \\  --format=FORMAT      Output format: text, json, junit (default: text)
-        \\  -jN, --jobs=N        Number of parallel test threads (default: 1)
-        \\
-        \\Test Suites:
-        \\  forge.scene          Scene creation and management
-        \\  forge.mesh           Mesh operations and processing
-        \\  forge.material       Material system tests
-        \\  forge.culling        Visibility and culling
-        \\  forge.camera         Camera controls and projection
-        \\  forge.lighting       Lighting calculations
-        \\  forge.render         Rendering pipeline
         \\
         \\Examples:
         \\  forge-cts --filter=SCN       Run all scene tests
@@ -225,16 +180,11 @@ fn runAllTests(allocator: std.mem.Allocator, options: Options) !RunnerResults {
     };
 
     for (all_suites) |suite| {
-        // Check suite filter
         if (options.suite) |suite_filter| {
-            if (!std.mem.eql(u8, suite.name, suite_filter)) {
-                continue;
-            }
+            if (!std.mem.eql(u8, suite.name, suite_filter)) continue;
         }
 
-        if (options.verbose) {
-            std.debug.print("\nRunning suite: {s}\n", .{suite.name});
-        }
+        if (options.verbose) std.debug.print("\nRunning suite: {s}\n", .{suite.name});
 
         const suite_results = try framework.runSuite(suite, config);
         try results.suite_results.append(suite_results);
@@ -290,7 +240,7 @@ fn outputText(results: RunnerResults, verbose: bool) void {
 
     std.debug.print("\n", .{});
     std.debug.print("-" ** 60 ++ "\n", .{});
-    std.debug.print("Total: {d} tests in {d}ms\n", .{ results.total(), results.duration_ms() });
+    std.debug.print("Total: {d} tests in {d}ms\n", .{ results.total(), results.durationMs() });
     std.debug.print("  Passed:          {d}\n", .{results.total_passed});
     std.debug.print("  Failed:          {d}\n", .{results.total_failed});
     std.debug.print("  Skipped:         {d}\n", .{results.total_skipped});
@@ -304,36 +254,29 @@ fn outputText(results: RunnerResults, verbose: bool) void {
     }
 }
 
-fn outputJson(allocator: std.mem.Allocator, results: RunnerResults) !void {
-    _ = allocator;
-    // TODO: Implement JSON output
-    std.debug.print("{{\n", .{});
-    std.debug.print("  \"total\": {d},\n", .{results.total()});
-    std.debug.print("  \"passed\": {d},\n", .{results.total_passed});
-    std.debug.print("  \"failed\": {d},\n", .{results.total_failed});
-    std.debug.print("  \"skipped\": {d},\n", .{results.total_skipped});
-    std.debug.print("  \"not_implemented\": {d},\n", .{results.total_not_implemented});
-    std.debug.print("  \"duration_ms\": {d}\n", .{results.duration_ms()});
-    std.debug.print("}}\n", .{});
+fn outputJson(results: RunnerResults) void {
+    std.debug.print(
+        \\{{
+        \\  "total": {d},
+        \\  "passed": {d},
+        \\  "failed": {d},
+        \\  "skipped": {d},
+        \\  "not_implemented": {d},
+        \\  "duration_ms": {d}
+        \\}}
+        \\
+    , .{ results.total(), results.total_passed, results.total_failed, results.total_skipped, results.total_not_implemented, results.durationMs() });
 }
 
-fn outputJunit(allocator: std.mem.Allocator, results: RunnerResults) !void {
-    _ = allocator;
-    // TODO: Implement JUnit XML output
-    std.debug.print("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n", .{});
-    std.debug.print("<testsuites tests=\"{d}\" failures=\"{d}\" skipped=\"{d}\">\n", .{
-        results.total(),
-        results.total_failed,
-        results.total_skipped + results.total_not_implemented,
-    });
-    std.debug.print("</testsuites>\n", .{});
+fn outputJunit(results: RunnerResults) void {
+    std.debug.print(
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<testsuites tests="{d}" failures="{d}" skipped="{d}">
+        \\</testsuites>
+        \\
+    , .{ results.total(), results.total_failed, results.total_skipped + results.total_not_implemented });
 }
-
-// =============================================================================
-// Zig Build Test Integration
-// =============================================================================
 
 test "runner compiles" {
-    // Basic compilation test
     _ = all_suites;
 }
